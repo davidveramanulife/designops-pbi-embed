@@ -14,18 +14,15 @@
     html, body { height:100%; margin:0; }
     body {
       font:14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      color:var(--ink); background:var(--bg);
+      color:var(--ink); background:var(--panel);
       display:flex; flex-direction:column; min-height:100vh;
     }
 
-    /* ---- shell (single card containing everything) ---- */
+    /* ---- shell (fills the embed frame edge-to-edge — no border, no chrome) ---- */
     .shell {
       flex:1; display:flex; flex-direction:column;
-      max-width: 1900px; width:100%; margin: 16px auto;
+      width:100%;
       background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      box-shadow: 0 1px 3px rgba(9,30,66,.12);
       overflow: hidden;
       min-height: 0;   /* allow inner flex to size the stage */
     }
