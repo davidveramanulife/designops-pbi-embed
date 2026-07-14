@@ -193,7 +193,13 @@
   // also work — but the top bar is what leadership sees at a glance.
   const CONFIG = {
     reportId: 'eefbebce-eae0-49be-b02a-86bf49aa0958',
-    groupId:  'b71360b5-7ec0-47f2-bcef-f79e50925801',
+    // groupId is intentionally kept for reference but NOT sent on the embed URL.
+    // The report lives in David's "My workspace" (webUrl:
+    //   https://app.powerbi.com/groups/me/reports/eefbebce-eae0-49be-b02a-86bf49aa0958
+    // ). Passing any other groupId in the /reportEmbed URL causes Power BI to
+    // fail to locate the report and the diagnostic overlay fires after 20s.
+    // Leaving it out lets Power BI infer the workspace from reportId + user token.
+    groupId:  'me',
     tenantId: '5d3e2773-e07f-4432-a630-1a0f68a28a05',
     pages: [
       { name: 'ede93d330d9f77345553', label: 'All Boards' },
@@ -269,7 +275,6 @@
   function buildEmbedUrl() {
     const params = new URLSearchParams({
       reportId: CONFIG.reportId,
-      groupId:  CONFIG.groupId,
       autoAuth: 'true',
       ctid:     CONFIG.tenantId,
       filterPaneEnabled: 'false',
