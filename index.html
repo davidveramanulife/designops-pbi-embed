@@ -79,6 +79,16 @@
       min-width:52px; height:28px; padding:0 8px;
       border:1px solid var(--border-soft); border-left:none; border-right:none;
       background:#fff; color:var(--muted); font: 600 12px/1 inherit;
+      /* input-specific resets so the field looks identical to the old span */
+      text-align:center; outline:none;
+      -webkit-appearance:none; appearance:none;
+      border-radius:0;
+    }
+    .btngroup .zoomlvl:focus {
+      border-color: var(--accent); color: var(--ink);
+      /* stronger focus ring since we removed the default outline */
+      box-shadow: 0 0 0 2px rgba(0,82,204,.15);
+      position: relative; z-index: 1;
     }
     .iconbtn {
       appearance:none; border:1px solid var(--border-soft); background:#fff;
@@ -143,7 +153,12 @@
       <label>Zoom</label>
       <div class="btngroup" role="group" aria-label="Zoom">
         <button id="zOut" title="Zoom out">−</button>
-        <span class="zoomlvl" id="zLvl">100%</span>
+        <span id="zLvlWrap" class="zoomlvl-wrap">
+          <input class="zoomlvl" id="zLvl" type="text" inputmode="numeric" value="100%"
+                 aria-label="Zoom level percent, type a number and press Enter"
+                 title="Type a percent (e.g. 500) and press Enter"
+                 size="4" />
+        </span>
         <button id="zIn"  title="Zoom in">+</button>
       </div>
       <button class="iconbtn" id="zReset" title="Reset zoom to 100%">Reset</button>
@@ -300,10 +315,24 @@
     el.iframe.style.height = zh + 'px';
   }
   function applyZoomUI() {
-    el.zLvl.textContent = Math.round(state.zoom * 100) + '%';
+    const pct = Math.round(state.zoom * 100) + '%';
+    // Don't clobber the user's in-progress edit while they're typing.
+    if (document.activeElement !== el.zLvl) el.zLvl.value = pct;
     el.zIn.disabled    = state.zoom >= CONFIG.maxZoom - 1e-6;
     el.zOut.disabled   = state.zoom <= CONFIG.minZoom + 1e-6;
     el.zReset.disabled = Math.abs(state.zoom - 1) < 1e-6;
+  }
+
+  // Parse whatever's in the zoom field ("500", "500%", " 250 %") and apply.
+  // Rejects non-numeric input by restoring the current value.
+  function commitZoomInput() {
+    const raw = String(el.zLvl.value || '').trim().replace(/%/g, '');
+    const n = parseFloat(raw);
+    if (isFinite(n) && n > 0) {
+      setZoom(n / 100);
+    } else {
+      el.zLvl.value = Math.round(state.zoom * 100) + '%';
+    }
   }
   function renderPagesNav() {
     if (CONFIG.pages.length < 2) { el.pagesNav.hidden = true; return; }
@@ -403,6 +432,28 @@
   el.zIn.onclick    = () => setZoom(state.zoom * CONFIG.zoomStep);
   el.zOut.onclick   = () => setZoom(state.zoom / CONFIG.zoomStep);
   el.zReset.onclick = () => setZoom(1);
+
+  // ---- Editable zoom field: type any percent and press Enter --------------
+  el.zLvl.addEventListener('focus', () => el.zLvl.select());
+  el.zLvl.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      commitZoomInput();
+      el.zLvl.blur();
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      el.zLvl.value = Math.round(state.zoom * 100) + '%';
+      el.zLvl.blur();
+    } else if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+      // Nudge by the same zoomStep the +/- buttons use.
+      ev.preventDefault();
+      const factor = ev.key === 'ArrowUp' ? CONFIG.zoomStep : 1 / CONFIG.zoomStep;
+      setZoom(state.zoom * factor);
+      // Re-select so the next Arrow keystroke keeps stepping.
+      requestAnimationFrame(() => el.zLvl.select());
+    }
+  });
+  el.zLvl.addEventListener('blur', commitZoomInput);
 
   el.fs.onclick = () => {
     if (document.fullscreenElement) document.exitFullscreen();
