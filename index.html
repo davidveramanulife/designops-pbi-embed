@@ -382,15 +382,25 @@
   function showLoadError() {
     el.loading.classList.remove('hidden');
     el.loading.classList.add('error');
+    // Build a top-level URL for the current page. Uses `groups/me` (David's
+    // My workspace); if the report ever moves, change CONFIG.groupId.
+    const grp = (CONFIG.groupId && CONFIG.groupId !== 'me') ? CONFIG.groupId : 'me';
+    const pg  = state.page || CONFIG.pages[0]?.name || '';
+    const openUrl = 'https://app.powerbi.com/groups/' + grp + '/reports/' + CONFIG.reportId + (pg ? '/' + pg : '');
     el.loading.innerHTML =
-        '<div style="max-width:520px;padding:20px;text-align:left;line-height:1.55">'
-      + '<strong style="display:block;font-size:14px;color:#172b4d;margin-bottom:8px">Power BI report didn\u2019t load.</strong>'
-      + '<div style="font-size:12.5px;color:#42526e">Common causes, in order of likelihood:</div>'
-      + '<ol style="font-size:12.5px;color:#42526e;margin:8px 0 0 20px;padding:0">'
-      + '<li>You\u2019re not signed in to Power BI. <a href="https://app.powerbi.com/" target="_blank" rel="noopener" style="color:#0052cc">Sign in here</a>, then reload this page.</li>'
-      + '<li>The report is in a personal workspace (“My workspace”) and hasn\u2019t been shared with your account. Ask the owner to share it or publish it to a shared workspace / Power BI App.</li>'
-      + '<li>Report ID mismatch. Verify <code>CONFIG.reportId</code> matches the URL of the intended report in Power BI Service.</li>'
-      + '<li>Third-party cookies blocked (Safari ITP, Firefox strict mode). Enable third-party cookies for <code>app.powerbi.com</code>.</li>'
+        '<div style="max-width:560px;padding:24px;text-align:left;line-height:1.55">'
+      + '<strong style="display:block;font-size:15px;color:#172b4d;margin-bottom:10px">Power BI report didn\u2019t load in this iframe.</strong>'
+      + '<div style="font-size:13px;color:#42526e;margin-bottom:14px">Most likely cause: your browser is blocking third-party cookies for <code>app.powerbi.com</code>, which the iframe needs for silent sign-in. Chrome, Safari, and Firefox all restrict this by default.</div>'
+      + '<div style="margin:14px 0 16px 0">'
+      +   '<a href="' + openUrl + '" target="_blank" rel="noopener" '
+      +      'style="display:inline-block;background:#0052cc;color:#fff;text-decoration:none;'
+      +      'padding:10px 18px;border-radius:4px;font: 600 13px/1 inherit">Open report in a new tab \u2192</a>'
+      + '</div>'
+      + '<div style="font-size:12px;color:#6b778c;margin-top:12px">Other things to try:</div>'
+      + '<ol style="font-size:12px;color:#6b778c;margin:6px 0 0 20px;padding:0">'
+      + '<li>Allow third-party cookies for <code>app.powerbi.com</code> in your browser settings, then reload this page.</li>'
+      + '<li>Make sure you\u2019re signed in to Power BI: <a href="https://app.powerbi.com/" target="_blank" rel="noopener" style="color:#0052cc">app.powerbi.com</a>.</li>'
+      + '<li>If you don\u2019t have access, ask the report owner to share it with your Manulife email.</li>'
       + '</ol></div>';
   }
   function scheduleLoadWatchdog() {
