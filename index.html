@@ -188,6 +188,497 @@
       { name: 'e26dfc1f8d9688964fa5', label: 'Systems' },
       { name: 'c813c7ca996c8fe40916', label: 'Content Design' },
       { name: '3813b9625b195929c6d9', label: 'Design Ops + AI + A11y' },
+    ],
+    minZoom: 0.25, maxZoom: 5, zoomStep: 1.15,
+    baseWidth: 1280, baseHeight: 820,
+    // How long to wait for the iframe 'load' event before showing a
+    // diagnostic overlay. Real PBI loads finish in <10s over a warm SSO
+    // session; anything longer usually means a permission / sign-in issue.
+    loadTimeoutMs: 20000,
+  };
+  // ==========================================================================
+
+  // Fit mode is fixed (Fit UI was removed). Change to 'fitToPage' | 'actualSize'
+  // here if a different default is preferred — a reload picks it up.
+  const PAGE_VIEW = 'fitToWidth';
+
+  // ================= STATE (deep-linkable via URL hash) =====================
+  // Hash format:  #page=<pageName>&size=<WxH|auto>&zoom=<n>
+  // Missing keys fall back to defaults so a bare URL still works.
+  const state = {
+    page: CONFIG.pages[0]?.name || '',
+    size: 'auto',
+    zoom: 1,
+  };
+
+  const $ = id => document.getElementById(id);
+  const el = {
+    iframe:   $('pbi'),
+    frame:    $('frame'),
+    stage:    $('stage'),
+    loading:  $('loading'),
+    pagesNav: $('pagesNav'),
+    sizeSel:  $('sizePreset'),
+    zIn:      $('zIn'),
+    zOut:     $('zOut'),
+    zReset:   $('zReset'),
+    zLvl:     $('zLvl'),
+    fs:       $('fullscreenBtn'),
+  };
+
+  // ---- URL hash ↔ state ---------------------------------------------------
+  function readHash() {
+    const raw = location.hash.replace(/^#/, '');
+    if (!raw) return;
+    const p = new URLSearchParams(raw);
+    const page = p.get('page');
+    if (page && CONFIG.pages.some(x => x.name === page)) state.page = page;
+    if (p.has('size')) state.size = p.get('size');
+    const z = parseFloat(p.get('zoom'));
+    if (!isNaN(z)) state.zoom = clamp(z, CONFIG.minZoom, CONFIG.maxZoom);
+  }
+  function writeHash() {
+    const p = new URLSearchParams();
+    const defaultPage = CONFIG.pages[0]?.name || '';
+    if (state.page && state.page !== defaultPage) p.set('page', state.page);
+    if (state.size !== 'auto') p.set('size', state.size);
+    if (Math.abs(state.zoom - 1) > 1e-6) p.set('zoom', state.zoom.toFixed(2));
+    const s = p.toString();
+    const target = s ? '#' + s : location.pathname + location.search;
+    if (location.hash !== (s ? '#' + s : '')) {
+      history.replaceState(null, '', target);
+    }
+  }
+
+  // ---- URL builder ---------------------------------------------------------
+  function buildEmbedUrl() {
+    const params = new URLSearchParams({
+      reportId: CONFIG.reportId,
+      groupId:  CONFIG.groupId,
+      autoAuth: 'true',
+      ctid:     CONFIG.tenantId,
+      filterPaneEnabled: 'false',
+      // PBI's native BOTTOM page tabs are hidden — our custom TOP tab bar
+      // (rendered from CONFIG.pages) is the sole navigation. Flip to 'true'
+      // if you ever want both.
+      navContentPaneEnabled: 'false',
+      pageView: PAGE_VIEW,
+    });
+    if (state.page) params.set('pageName', state.page);
+    return 'https://app.powerbi.com/reportEmbed?' + params.toString();
+  }
+
+  // ---- Helpers -------------------------------------------------------------
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function resolveSize() {
+    if (state.size === 'auto') {
+      const box = el.stage.getBoundingClientRect();
+      // Leave a hair of margin so the frame doesn't kiss the scroll gutters.
+      return {
+        w: Math.max(320, Math.floor(box.width)  - 2),
+        h: Math.max(240, Math.floor(box.height) - 2),
+      };
+    }
+    const m = /^(\d+)x(\d+)$/.exec(state.size);
+    if (m) return { w: +m[1], h: +m[2] };
+    return { w: CONFIG.baseWidth, h: CONFIG.baseHeight };
+  }
+
+  // ---- Renderers -----------------------------------------------------------
+  // Zoom + size are applied by physically resizing the iframe. Power BI's
+  // embed player re-fits on iframe resize, so text/visuals re-rasterize crisp.
+  // (CSS `zoom` on <iframe> is silently ignored in current Chromium — do not
+  // reintroduce it here.)
+  function applySize() {
+    const { w, h } = resolveSize();
+    const zw = Math.round(w * state.zoom);
+    const zh = Math.round(h * state.zoom);
+    el.frame.style.width  = zw + 'px';
+    el.frame.style.height = zh + 'px';
+    el.iframe.style.width  = zw + 'px';
+    el.iframe.style.height = zh + 'px';
+  }
+  function applyZoomUI() {
+    el.zLvl.textContent = Math.round(state.zoom * 100) + '%';
+    el.zIn.disabled    = state.zoom >= CONFIG.maxZoom - 1e-6;
+    el.zOut.disabled   = state.zoom <= CONFIG.minZoom + 1e-6;
+    el.zReset.disabled = Math.abs(state.zoom - 1) < 1e-6;
+  }
+  function renderPagesNav() {
+    if (CONFIG.pages.length < 2) { el.pagesNav.hidden = true; return; }
+    el.pagesNav.hidden = false;
+    el.pagesNav.innerHTML = CONFIG.pages.map(p =>
+      `<button type="button" class="pagebtn ${p.name === state.page ? 'active' : ''}" data-page="${p.name}">${escapeHtml(p.label)}</button>`
+    ).join('');
+    el.pagesNav.querySelectorAll('.pagebtn').forEach(btn => {
+      btn.addEventListener('click', () => setPage(btn.dataset.page));
+    });
+  }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // ---- Main render pipeline -----------------------------------------------
+  // Reloads the iframe only when the page changed (URL-baked param).
+  // Zoom + size changes just resize the iframe; PBI re-fits automatically.
+  // Sentinel `null` guarantees the first render() assigns iframe.src even
+  // when state.page starts as '' (empty CONFIG.pages).
+  let lastPageSig = null;
+  let loadTimer = null;
+  function render() {
+    writeHash();
+    applySize();
+    applyZoomUI();
+    renderPagesNav();
+
+    if (state.page !== lastPageSig) {
+      lastPageSig = state.page;
+      showLoading();
+      el.iframe.src = buildEmbedUrl();
+      scheduleLoadWatchdog();
+    }
+  }
+
+  // ---- Loading / error overlay --------------------------------------------
+  function showLoading() {
+    el.loading.textContent = 'Loading report…';
+    el.loading.classList.remove('hidden', 'error');
+  }
+  function showLoadError() {
+    el.loading.classList.remove('hidden');
+    el.loading.classList.add('error');
+    el.loading.innerHTML =
+        '<div style="max-width:520px;padding:20px;text-align:left;line-height:1.55">'
+      + '<strong style="display:block;font-size:14px;color:#172b4d;margin-bottom:8px">Power BI report didn\u2019t load.</strong>'
+      + '<div style="font-size:12.5px;color:#42526e">Common causes, in order of likelihood:</div>'
+      + '<ol style="font-size:12.5px;color:#42526e;margin:8px 0 0 20px;padding:0">'
+      + '<li>You\u2019re not signed in to Power BI. <a href="https://app.powerbi.com/" target="_blank" rel="noopener" style="color:#0052cc">Sign in here</a>, then reload this page.</li>'
+      + '<li>The report is in a personal workspace (“My workspace”) and hasn\u2019t been shared with your account. Ask the owner to share it or publish it to a shared workspace / Power BI App.</li>'
+      + '<li>Report ID mismatch. Verify <code>CONFIG.reportId</code> matches the URL of the intended report in Power BI Service.</li>'
+      + '<li>Third-party cookies blocked (Safari ITP, Firefox strict mode). Enable third-party cookies for <code>app.powerbi.com</code>.</li>'
+      + '</ol></div>';
+  }
+  function scheduleLoadWatchdog() {
+    if (loadTimer) clearTimeout(loadTimer);
+    loadTimer = setTimeout(showLoadError, CONFIG.loadTimeoutMs);
+  }
+
+  // ---- Setters (all funnel through render for consistency) -----------------
+  function setPage(name) { state.page = name; render(); }
+  function setZoom(z) {
+    // Zoom to viewport center: capture the fractional focal-point of the
+    // stage's visible viewport BEFORE resizing, then scroll to put the same
+    // fractional point back under the center after render() applies the new
+    // iframe dimensions. Without this the iframe grows from top-left origin
+    // and the user's focus scrolls off to the right/bottom every click.
+    const stage = el.stage;
+    const oldW = el.iframe.offsetWidth  || 1;
+    const oldH = el.iframe.offsetHeight || 1;
+    const cxFrac = (stage.scrollLeft + stage.clientWidth  / 2) / oldW;
+    const cyFrac = (stage.scrollTop  + stage.clientHeight / 2) / oldH;
+
+    state.zoom = clamp(+z.toFixed(3), CONFIG.minZoom, CONFIG.maxZoom);
+    render();
+
+    const newW = el.iframe.offsetWidth  || oldW;
+    const newH = el.iframe.offsetHeight || oldH;
+    stage.scrollLeft = Math.max(0, Math.round(cxFrac * newW - stage.clientWidth  / 2));
+    stage.scrollTop  = Math.max(0, Math.round(cyFrac * newH - stage.clientHeight / 2));
+  }
+  function setSize(size) { state.size = size; render(); }
+
+  // ---- UI reflection (state → controls) ------------------------------------
+  function reflectState() {
+    const preset = Array.from(el.sizeSel.options).map(o => o.value);
+    if (preset.includes(state.size)) el.sizeSel.value = state.size;
+    // Unknown size values (e.g. leftover custom WxH from an old deep-link)
+    // fall back to Auto — no custom-size input exists any more.
+    else { state.size = 'auto'; el.sizeSel.value = 'auto'; }
+  }
+
+  // ---- Wire controls -------------------------------------------------------
+  el.sizeSel.addEventListener('change', () => setSize(el.sizeSel.value));
+
+  el.zIn.onclick    = () => setZoom(state.zoom * CONFIG.zoomStep);
+  el.zOut.onclick   = () => setZoom(state.zoom / CONFIG.zoomStep);
+  el.zReset.onclick = () => setZoom(1);
+
+  el.fs.onclick = () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else if (el.stage.requestFullscreen) el.stage.requestFullscreen();
+  };
+  document.addEventListener('fullscreenchange', () => {
+    // Re-fit after entering/leaving fullscreen so auto-size picks up new dims.
+    if (state.size === 'auto') requestAnimationFrame(applySize);
+  });
+
+  // Auto-resize when window changes and size = auto
+  let resizeRAF = null;
+  window.addEventListener('resize', () => {
+    if (state.size !== 'auto') return;
+    if (resizeRAF) cancelAnimationFrame(resizeRAF);
+    resizeRAF = requestAnimationFrame(applySize);
+  });
+
+  el.iframe.addEventListener('load', () => {
+    if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
+    el.loading.classList.add('hidden');
+  });
+
+  window.addEventListener('hashchange', () => {
+    readHash(); reflectState(); render();
+  });
+
+  // ---- Track PBI's inner-page navigation via postMessage -------------------
+  // When the user clicks Power BI's native bottom page tabs inside the iframe,
+  // PBI navigates internally and emits notifications over window.postMessage.
+  // The plain-iframe (no SDK) message format is undocumented and has drifted
+  // over the years, so we scan every message from a *.powerbi.com origin for
+  // a `"newPage" … "name":"<GUID>"` fragment. When we spot one we update
+  // state.page WITHOUT triggering a reload — the parent side now knows the
+  // true current page, so the next Fit-mode change (which does reload the
+  // iframe) preserves the user's page instead of bouncing them to page 1.
+  //
+  // Debug: `window.__pbiMessages` retains the most recent 40 raw messages —
+  // open DevTools and inspect if page-tracking doesn't fire.
+  window.__pbiMessages = [];
+  window.addEventListener('message', (ev) => {
+    let host = '';
+    try { host = new URL(ev.origin).hostname; } catch { return; }
+    if (!/(^|\.)powerbi\.com$/.test(host)) return;
+    const raw = ev.data;
+    const str = typeof raw === 'string' ? raw : (() => {
+      try { return JSON.stringify(raw); } catch { return ''; }
+    })();
+    if (!str) return;
+    // Keep a short ring for diagnostics.
+    window.__pbiMessages.push(str.length > 500 ? str.slice(0, 500) + '…' : str);
+    if (window.__pbiMessages.length > 40) window.__pbiMessages.shift();
+
+    // Extract the newly-active page name. Match the several plausible
+    // envelope shapes PBI has used (SDK-wrapped, raw event, notification).
+    const m = str.match(/"newPage"\s*:\s*\{[^{}]*"name"\s*:\s*"([^"]+)"/)
+           || str.match(/"pageChanged"[\s\S]{0,300}?"name"\s*:\s*"([^"]+)"/)
+           || str.match(/"activePage"\s*:\s*\{[^{}]*"name"\s*:\s*"([^"]+)"/);
+    if (!m) return;
+    const newName = m[1];
+    if (!newName || newName === state.page) return;
+
+    state.page = newName;
+    // Refresh dependent UI without triggering a reload.
+    writeHash();
+    renderPagesNav();
+    // Sync the reload-guard so render() doesn't detect a page-change and
+    // re-issue the same URL back into the iframe.
+    lastPageSig = state.page;
+  });
+
+  // ---- Boot ----------------------------------------------------------------
+  // Size iframe BEFORE assigning src so PBI's initial fit is computed against
+  // real dims (not the browser default 300×150).
+  // We call render() SYNCHRONOUSLY (not via requestAnimationFrame) because
+  // background/hidden tabs throttle rAF to zero fires — the embed would sit
+  // at 300×150 with an empty src forever. The script is at end of body so
+  // the DOM is fully parsed and every element is measurable already.
+  readHash();
+  reflectState();
+  render();
+})();
+</script>
+
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PBI Embed</title>
+  <style>
+    :root {
+      --ink:#172b4d; --muted:#6b778c; --accent:#0052cc; --accent-bg:#deebff;
+      --border:#c1c7d0; --border-soft:#dfe1e6;
+      --panel:#fff; --bg:#f4f5f7; --hover:#ebecf0;
+    }
+    * { box-sizing: border-box; }
+    html, body { height:100%; margin:0; }
+    body {
+      font:14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color:var(--ink); background:var(--panel);
+      display:flex; flex-direction:column; min-height:100vh;
+    }
+
+    /* ---- shell (fills the embed frame edge-to-edge — no border, no chrome) ---- */
+    .shell {
+      flex:1; display:flex; flex-direction:column;
+      width:100%;
+      background: var(--panel);
+      overflow: hidden;
+      min-height: 0;   /* allow inner flex to size the stage */
+    }
+
+    /* ---- external page nav (hidden if < 2 pages configured) ---- */
+    .pages {
+      display:flex; gap:4px; flex-wrap:wrap;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border-soft);
+      background: #fff;
+    }
+    .pagebtn {
+      appearance:none; border:1px solid var(--border-soft); background:#fff;
+      color:var(--ink); font: 600 12px/1 inherit;
+      padding: 6px 12px; height:28px; border-radius:4px; cursor:pointer;
+    }
+    .pagebtn:hover { background: var(--hover); }
+    .pagebtn.active { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+
+    /* ---- controls bar (size / fit / zoom / fullscreen) ---- */
+    .controls {
+      display:flex; align-items:center; gap:18px; flex-wrap:wrap;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border-soft);
+      background: #fafbfc;
+    }
+    .ctrl { display:flex; align-items:center; gap:6px; }
+    .ctrl-right { margin-left:auto; }
+    .ctrl label {
+      font: 700 10.5px/1 inherit; text-transform:uppercase; letter-spacing:.06em;
+      color:var(--muted);
+    }
+    .ctrl select {
+      appearance:none; border:1px solid var(--border-soft); background:#fff;
+      color:var(--ink); font: 500 12px/1 inherit;
+      padding: 6px 8px; height:28px; border-radius:4px;
+    }
+
+    .btngroup { display:inline-flex; }
+    .btngroup button {
+      appearance:none; border:1px solid var(--border-soft); background:#fff;
+      color:var(--ink); font: 600 12px/1 inherit; cursor:pointer;
+      min-width:30px; height:28px; padding: 0 10px;
+    }
+    .btngroup button + button { border-left: none; }
+    .btngroup button:first-child { border-radius:4px 0 0 4px; }
+    .btngroup button:last-child  { border-radius:0 4px 4px 0; }
+    .btngroup button:only-child  { border-radius:4px; }
+    .btngroup button:hover:not(:disabled) { background:var(--hover); }
+    .btngroup button:disabled { opacity:.4; cursor:default; }
+    .btngroup button.active { background:var(--accent-bg); border-color:var(--accent); color:var(--accent); }
+    .btngroup .zoomlvl {
+      display:inline-flex; align-items:center; justify-content:center;
+      min-width:52px; height:28px; padding:0 8px;
+      border:1px solid var(--border-soft); border-left:none; border-right:none;
+      background:#fff; color:var(--muted); font: 600 12px/1 inherit;
+    }
+    .iconbtn {
+      appearance:none; border:1px solid var(--border-soft); background:#fff;
+      color:var(--ink); font: 600 12px/1 inherit; cursor:pointer;
+      height:28px; padding:0 10px; border-radius:4px;
+    }
+    .iconbtn:hover { background:var(--hover); }
+
+    /* ---- stage (scrollable viewport around the iframe) ---- */
+    .stage {
+      position:relative; flex:1; min-height: 400px;
+      overflow: auto; background:#fff;
+    }
+    .stage:fullscreen { background:#fff; padding: 12px; }
+    .frame {
+      /* Anchored top-left inside the stage so scroll behaviour is consistent
+         at every zoom level. Previously used `margin: 0 auto` which centred
+         the frame when smaller than the stage but jumped to left-align on
+         the first pixel of overflow — the "weird side scroll" the user saw
+         mid-zoom. Zoom-to-center is now handled in setZoom() by adjusting
+         stage.scrollLeft/scrollTop instead. */
+      position:relative;
+    }
+    .frame iframe {
+      display:block; border:0; background:#fff;
+    }
+    .loading {
+      position:absolute; inset:0;
+      display:flex; align-items:center; justify-content:center;
+      color:var(--muted); font-size:13px;
+      transition: opacity .25s;
+    }
+    .loading.hidden { opacity:0; pointer-events:none; }
+    .loading.error {
+      background: rgba(244, 245, 247, 0.98);
+      align-items:flex-start; padding-top:60px;
+    }
+    .loading a { color: var(--accent); }
+    .loading code {
+      background:#f4f5f7; padding:1px 5px; border-radius:3px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="shell">
+  <nav class="pages" id="pagesNav" hidden aria-label="Report pages"></nav>
+
+  <section class="controls" aria-label="View controls">
+    <div class="ctrl">
+      <label for="sizePreset">Size</label>
+      <select id="sizePreset">
+        <option value="auto">Auto (fills window)</option>
+        <option value="1280x720">1280 × 720</option>
+        <option value="1600x900">1600 × 900</option>
+        <option value="1920x1080">1920 × 1080</option>
+      </select>
+    </div>
+
+    <div class="ctrl">
+      <label>Zoom</label>
+      <div class="btngroup" role="group" aria-label="Zoom">
+        <button id="zOut" title="Zoom out">−</button>
+        <span class="zoomlvl" id="zLvl">100%</span>
+        <button id="zIn"  title="Zoom in">+</button>
+      </div>
+      <button class="iconbtn" id="zReset" title="Reset zoom to 100%">Reset</button>
+    </div>
+
+    <div class="ctrl ctrl-right">
+      <button class="iconbtn" id="fullscreenBtn" title="Toggle fullscreen">Fullscreen</button>
+    </div>
+  </section>
+
+  <section class="stage" id="stage">
+    <div class="frame" id="frame">
+      <iframe id="pbi" allow="fullscreen" allowfullscreen loading="eager" title="Power BI report"></iframe>
+    </div>
+    <div class="loading" id="loading">Loading report…</div>
+  </section>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ================= CONFIG =================================================
+  // Leadership's live Power BI report: **Design Ops Dashboard**.
+  // Owner-side URL:
+  //   https://app.powerbi.com/groups/me/reports/eefbebce-eae0-49be-b02a-86bf49aa0958/<pageName>
+  // Verified 2026-07-08 by opening the report in PBI Service and clicking
+  // through every bottom tab to capture each pageName GUID.
+  //
+  // `pages` renders our top tab bar (auto-hidden if length < 2). Removing
+  // it or clearing it here falls back to PBI's native bottom tabs, which
+  // also work — but the top bar is what leadership sees at a glance.
+  const CONFIG = {
+    reportId: 'eefbebce-eae0-49be-b02a-86bf49aa0958',
+    groupId:  'b71360b5-7ec0-47f2-bcef-f79e50925801',
+    tenantId: '5d3e2773-e07f-4432-a630-1a0f68a28a05',
+    pages: [
+      { name: 'ede93d330d9f77345553', label: 'All Boards' },
+      { name: '79771be32e7039bb5fb3', label: 'B2B' },
+      { name: '80d30d2145b282e21b61', label: 'B2C' },
+      { name: '80b38f53e6046eeedbd1', label: 'Mobile + Bank' },
+      { name: 'e26dfc1f8d9688964fa5', label: 'Systems' },
+      { name: 'c813c7ca996c8fe40916', label: 'Content Design' },
+      { name: '3813b9625b195929c6d9', label: 'Design Ops + AI + A11y' },
       { name: '1d44e7ceb0c02af2c5f7', label: 'Highlights' },
     ],
     minZoom: 0.25, maxZoom: 5, zoomStep: 1.15,
